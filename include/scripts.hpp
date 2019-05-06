@@ -67,6 +67,6 @@ void defaultInit(color side);
  * Line the bot up to the high alliance flag.
  */
 void defaultScript(color side, uint32_t ign1, uint32_t ign2);
-}  // namespace auton
+} // namespace auton
 
 #endif

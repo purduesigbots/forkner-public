@@ -52,10 +52,10 @@
  */
 #define IN_TO_METERS 0.0254f
 #define ENC_WHEEL_DIAM (3.25f * IN_TO_METERS)
-#define ENC_CHASSIS_WIDTH \
-	(6.75f * IN_TO_METERS)  // currently measuring center to center
+#define ENC_CHASSIS_WIDTH                                                      \
+  (6.75f * IN_TO_METERS) // currently measuring center to center
 
-#define DRIVE_MOTOR_MAX_VEL 200  // in RPM
+#define DRIVE_MOTOR_MAX_VEL 200 // in RPM
 #define DRIVE_DRIVEN_WHEEL_DIAM (4.125f * IN_TO_METERS)
 #define DRIVE_CHASSIS_WIDTH (12.0f * IN_TO_METERS)
 
