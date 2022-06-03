@@ -300,69 +300,123 @@ void setDriveMaxCurrent(int ilimit) {
   rm4->setCurrentLimit(ilimit);
 }
 
-double prevTurn = 0.0;
+/**
+ * The "curvature" drive control written by FRC team 254.
+ *
+ * See the Java source at
+ * https://github.dev/Team254/FRC-2015/blob/9dcc11886a49d29f16e597e317c995ca248efaed/src/com/team254/frc2015/CheesyDriveHelper.java#L24
+ *
+ * Essentially this does three things:
+ *
+ * Cheesy Drive applies some non-linearity to the joystick input so that
+ * there is more control at the low speeds (larger changes in joystick inputs
+ * result in smaller changes in real speed here) but when the joystick is
+ * pushed to a high speed, you jump up to full speed faster.
+ *
+ * Additionally, when you a driving forward but also turning a bit, the turn
+ * input affects the "curvature" of the movement rather than adding/subtracting
+ * linearly from the wheel speeds. The turn output is a sum of the throttle and
+ * turn inputs, meaning that the robot will turn faster when it's moving
+ * forward at a higher speed. Again, the goal here is more control at low
+ * speeds.
+ *
+ * Third, that turn input is affected by a negative inertia accumulator. Most
+ * robots have a fair bit of turning inertia, which can make it easy to
+ * accidentally overshoot a turn. The negative inertia accumulator acts almost
+ * like a reverse integral controller - the longer the robot has been turning
+ * (fast) for, the slower the robot will turn.
+ */
+
+// We apply a sinusoidal curve (twice) to the joystick input to give finer
+// control at small inputs.
+static double _turnRemapping(double iturn) {
+	double denominator = sin(PI / 2 * CD_TURN_NONLINEARITY);
+	double firstRemapIteration =
+	    sin(PI / 2 * CD_TURN_NONLINEARITY * iturn) / denominator;
+	return sin(PI / 2 * CD_TURN_NONLINEARITY * firstRemapIteration) / denominator;
+}
+
+// On each iteration of the drive controller (where we aren't point turning) we
+// constrain the accumulators to the range [-1, 1].
 double quickStopAccumlator = 0.0;
 double negInertiaAccumlator = 0.0;
+static void _updateAccumulators() {
+	if (negInertiaAccumlator > 1) {
+		negInertiaAccumlator -= 1;
+	} else if (negInertiaAccumlator < -1) {
+		negInertiaAccumlator += 1;
+	} else {
+		negInertiaAccumlator = 0;
+	}
+
+	if (quickStopAccumlator > 1) {
+		quickStopAccumlator -= 1;
+	} else if (quickStopAccumlator < -1) {
+		quickStopAccumlator += 1;
+	} else {
+		quickStopAccumlator = 0.0;
+	}
+}
+
+double prevTurn = 0.0;
 double prevThrottle = 0.0;
 void cheesyDrive(double ithrottle, double iturn) {
-  bool turnInPlace = false;
-  if (fabs(ithrottle) < DRIVE_DEADBAND && fabs(iturn) > DRIVE_DEADBAND) {
-    ithrottle = 0;
-    turnInPlace = true;
-  } else if (ithrottle - prevThrottle > DRIVE_SLEW) {
-    ithrottle = prevThrottle + DRIVE_SLEW;
-  } else if (ithrottle - prevThrottle < -(DRIVE_SLEW * 2)) {
-    ithrottle = prevThrottle - (DRIVE_SLEW * 2);
-  }
-  prevThrottle = ithrottle;
+	bool turnInPlace = false;
+	double linearCmd = ithrottle;
+	if (fabs(ithrottle) < DRIVE_DEADBAND && fabs(iturn) > DRIVE_DEADBAND) {
+		// The controller joysticks can output values near zero when they are
+		// not actually pressed. In the case of small inputs like this, we
+		// override the throttle value to 0.
+		linearCmd = 0.0;
+		turnInPlace = true;
+	} else if (ithrottle - prevThrottle > DRIVE_SLEW) {
+		linearCmd = prevThrottle + DRIVE_SLEW;
+	} else if (ithrottle - prevThrottle < -(DRIVE_SLEW * 2)) {
+		// We double the drive slew rate for the reverse direction to get
+		// faster stopping.
+		linearCmd = prevThrottle - (DRIVE_SLEW * 2);
+	}
 
-  double negInertia = iturn - prevTurn;
-  prevTurn = iturn;
+	double remappedTurn = _turnRemapping(iturn);
 
-  double left, right;
-  double denominator = sin(PI / 2 * CD_TURN_NONLINEARITY);
-  if (turnInPlace) {
-    iturn = sin(PI / 2 * CD_TURN_NONLINEARITY * iturn) / denominator;
-    iturn = sin(PI / 2 * CD_TURN_NONLINEARITY * iturn) / denominator;
-    left = iturn * std::abs(iturn);
-    right = -iturn * std::abs(iturn);
-  } else {
-    // Apply a sin function that's scaled to make it feel better.
-    iturn = sin(PI / 2 * CD_TURN_NONLINEARITY * iturn) / denominator;
-    iturn = sin(PI / 2 * CD_TURN_NONLINEARITY * iturn) / denominator;
+	double left, right;
+	if (turnInPlace) {
+		// The remappedTurn value is squared when turning in place. This
+		// provides even more fine control over small speed values.
+		left = remappedTurn * std::abs(remappedTurn);
+		right = -remappedTurn * std::abs(remappedTurn);
 
-    double angularPower, linearPower;
+		// The FRC Cheesy Drive Implementation calculated the
+		// quickStopAccumulator here:
+		// if (Math.abs(linearPower) < 0.2) {
+		// 	double alpha = 0.1;
+		// 	quickStopAccumulator = (1 - alpha) * quickStopAccumulator
+		// 			+ alpha * Util.limit(wheel, 1.0) * 5;
+		// }
+		// But I apparently left that out of my implementation? Seemed to work
+		// without it though.
+	} else {
+		double negInertiaPower = (iturn - prevTurn) * CD_NEG_INERTIA_SCALAR;
+		negInertiaAccumlator += negInertiaPower;
 
-    // Negative inertia!
-    double negInertiaPower = negInertia * CD_NEG_INERTIA_SCALAR;
-    negInertiaAccumlator += negInertiaPower;
+		double angularCmd =
+		    abs(linearCmd) *  // the more linear vel, the faster we turn
+		        (remappedTurn + negInertiaAccumlator) *
+		        CD_SENSITIVITY -  // we can scale down the turning amount by a
+		                          // constant
+		    quickStopAccumlator;
 
-    iturn = iturn + negInertiaAccumlator;
-    if (negInertiaAccumlator > 1) {
-      negInertiaAccumlator -= 1;
-    } else if (negInertiaAccumlator < -1) {
-      negInertiaAccumlator += 1;
-    } else {
-      negInertiaAccumlator = 0;
-    }
-    linearPower = ithrottle;
+		right = left = linearCmd;
+		left += angularCmd;
+		right -= angularCmd;
 
-    angularPower =
-        abs(ithrottle) * iturn * CD_SENSITIVITY - quickStopAccumlator;
-    if (quickStopAccumlator > 1) {
-      quickStopAccumlator -= 1;
-    } else if (quickStopAccumlator < -1) {
-      quickStopAccumlator += 1;
-    } else {
-      quickStopAccumlator = 0.0;
-    }
+		_updateAccumulators();
+	}
 
-    right = left = linearPower;
-    left += angularPower;
-    right -= angularPower;
-  }
+	controller->tank(left, right);
 
-  controller->tank(left, right);
+	prevTurn = iturn;
+	prevThrottle = ithrottle;
 }
 
 void park() {
